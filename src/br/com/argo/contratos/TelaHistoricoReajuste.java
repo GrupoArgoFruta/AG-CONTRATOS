@@ -19,6 +19,7 @@ public class TelaHistoricoReajuste {
 		try {
 			
 			hnd = JapeSession.open(); // Abertura da sessão do JapeSession
+			@SuppressWarnings("unused")
 			DynamicVO histoVo = hisDAO.create()
 				.set("CODCONTRATO", codcontrato)
 				.set("FREQREAJ", frequencia)

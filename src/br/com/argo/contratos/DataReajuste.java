@@ -27,11 +27,9 @@ public class DataReajuste implements  EventoProgramavelJava {
 		BigDecimal codUsuProd = ((AuthenticationInfo) ServiceContext.getCurrent().getAutentication()).getUserID();
 		String usuarioLogadoNome = ((AuthenticationInfo) ServiceContext.getCurrent().getAutentication()).getUsuVO().getNOMEUSU();
 		TelaHistoricoReajuste telaHisto = new TelaHistoricoReajuste();
-		Util utl = new Util();
 		NotificacaoUser notificar = new NotificacaoUser();
 		DynamicVO vo = (DynamicVO) event.getVo();
 		JapeWrapper contraDAO = JapeFactory.dao("Contrato");
-		DynamicVO contrato = contraDAO.findByPK(vo.asBigDecimal("NUMCONTRATO"));
 		Timestamp dtAlteracao = new Timestamp(new Date().getTime());
 		String tituloNotificacao = "Inclusão de histórico";
 		telaHisto.lancarHistorico(vo.asBigDecimal("NUMCONTRATO"),vo.asBigDecimal("FREQREAJ"),vo.asTimestamp("DTBASEREAJ"),null , null, dtAlteracao, codUsuProd,usuarioLogadoNome,vo.asBigDecimal("AD_VLRCONTRATO"),null);

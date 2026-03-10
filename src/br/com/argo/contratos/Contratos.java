@@ -1,6 +1,5 @@
 package br.com.argo.contratos;
 
-import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
@@ -48,11 +47,12 @@ public class Contratos implements ScheduledAction {
 			queryVoa.appendSql("SELECT CON.NUMCONTRATO, CON.DTCONTRATO,CON.DTTERMINO,CON.CODPARC,t.EMAIL,PAR.NOMEPARC \r\n"
 					+ "					FROM TCSCON CON,TGFPAR PAR,TGFCTT t\r\n"
 					+ "					WHERE CON.CODPARC = PAR.CODPARC \r\n"
-					+ "					AND t.CODPARC = PAR.CODPARC");
+					+ "					AND t.CODPARC = CON.CODPARC  AND t.CODCONTATO = CON.CODCONTATO");
 			
 			// Executa a consulta SQL e obtém o conjunto de resultados
 			rset = queryVoa.executeQuery();
 			while (rset.next()) {
+				Calendar dataAtual = Calendar.getInstance();
 				// Obtém os valores das colunas do resultado da consulta
 				Long numeroContrato = rset.getLong("NUMCONTRATO");
 				Date datainicio = rset.getDate("DTCONTRATO");
@@ -65,8 +65,9 @@ public class Contratos implements ScheduledAction {
 				SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
 				String dataInicioFormatada = sdf.format(datainicio);
 				String dataFimFormatada = sdf.format(datafim);
+				String strDataHoje = sdf.format(dataAtual.getTime());
 				// Data atual do calendário
-				Calendar dataAtual = Calendar.getInstance();
+			
 				// Remover horas, minutos, segundos e milissegundos da data atual
 				zerarHorasMinutosSegundos(dataAtual);
 				
@@ -202,7 +203,7 @@ public class Contratos implements ScheduledAction {
 					envioEmails.enviarEmail(tituloEmail30, corpoemail);
 					notificauser.notifUsu(mensagemNotificacao, tituloEmail30);
 					
-				}else if (datafim.equals(dataAtual.getTime())) {
+				}else if (dataFimFormatada.equals(strDataHoje)) {
 					String corpoemail2 = "<!DOCTYPE html>\r\n"
 							+ "<head>\r\n"
 							+ "<title>Lembrete da Argo Fruta</title>\r\n"

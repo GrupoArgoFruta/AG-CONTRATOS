@@ -2,8 +2,6 @@ package br.com.argo.contratos;
 
 import java.math.BigDecimal;
 
-import org.cuckoo.core.ScheduledActionContext;
-
 import com.sankhya.util.TimeUtils;
 
 import br.com.sankhya.jape.vo.DynamicVO;
@@ -17,10 +15,12 @@ public class NotificacaoUser {
 		JapeWrapper avisoDAO = JapeFactory.dao("AvisoSistema");
 		try {
 			
+				@SuppressWarnings("unused")
 				DynamicVO avisoVO = (DynamicVO) avisoDAO.create()
 						.set("NUAVISO", null)
 						.set("CODUSUREMETENTE", BigDecimal.valueOf(0))
-						.set("CODUSU", BigDecimal.valueOf(145)) // Notificar usuário individualmente																		
+						.set("CODUSU", BigDecimal.valueOf(145)) // Notificar usuário individualmente
+//						.set("CODUSU", BigDecimal.valueOf(0)) // Notificar usuário individualmente
 						.set("TITULO", titulo)
 						.set("DESCRICAO", obs)
 						.set("DHCRIACAO", TimeUtils.getNow())

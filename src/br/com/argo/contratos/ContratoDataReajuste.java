@@ -1,16 +1,14 @@
 package br.com.argo.contratos;
+
 import java.math.BigDecimal;
-import java.sql.Date;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
-import java.util.Calendar;
-import java.util.concurrent.TimeUnit;
 
 import org.cuckoo.core.ScheduledAction;
 import org.cuckoo.core.ScheduledActionContext;
 
-import com.sankhya.util.Base64Impl;
-import com.sankhya.util.BigDecimalUtil;
 import com.sankhya.util.JdbcUtils;
 
 import br.com.sankhya.jape.EntityFacade;
@@ -18,286 +16,262 @@ import br.com.sankhya.jape.core.JapeSession;
 import br.com.sankhya.jape.core.JapeSession.SessionHandle;
 import br.com.sankhya.jape.dao.JdbcWrapper;
 import br.com.sankhya.jape.sql.NativeSql;
-import br.com.sankhya.jape.wrapper.JapeFactory;
-import br.com.sankhya.jape.wrapper.JapeWrapper;
-import br.com.sankhya.modelcore.MGEModelException;
-import br.com.sankhya.modelcore.util.DynamicEntityNames;
 import br.com.sankhya.modelcore.util.EntityFacadeFactory;
-public class ContratoDataReajuste implements ScheduledAction{
+
+/**
+ * Evento programado para envio de notificações de reajuste de contrato.
+ *
+ * Dispara emails e notificações internas nos marcos de 30 dias, 15 dias
+ * e no dia do vencimento da data base de reajuste (DTBASEREAJ).
+ *
+ * Utiliza a tabela AD_LOGNOTIFCONTRATO com constraint UNIQUE
+ * (NUMCONTRATO, TIPONOTIF, DTBASEREAJ) para garantir envio único
+ * por contrato/tipo/data de reajuste.
+ *
+ * Cron sugerido: 0 0 6 ? * * (todo dia às 06:00)  0 0 0 ? * *
+ */
+public class ContratoDataReajuste implements ScheduledAction {
+
+	private static final SimpleDateFormat SDF = new SimpleDateFormat("dd/MM/yyyy");
+
+	// ========================== QUERY PRINCIPAL ==========================
+	// Retorna apenas contratos que:
+	// 1. Estão na janela de notificação (0, 15 ou 30 dias)
+	// 2. Ainda NÃO foram notificados nesse ciclo (NOT EXISTS no log)
+	// ====================================================================
+	private static final String SQL_CONTRATOS_PENDENTES =
+			"SELECT CON.NUMCONTRATO, CON.DTCONTRATO, CON.DTBASEREAJ, " +
+					"       CON.CODPARC, T.EMAIL, PAR.NOMEPARC, " +
+					"       TRUNC(CON.DTBASEREAJ) - TRUNC(SYSDATE) AS DIAS_RESTANTES " +
+					"FROM TCSCON CON " +
+					"JOIN TGFPAR PAR ON CON.CODPARC = PAR.CODPARC " +
+					"JOIN TGFCTT T ON T.CODPARC = CON.CODPARC " +
+					"  AND T.CODCONTATO = CON.CODCONTATO " +
+					"WHERE CON.DTBASEREAJ IS NOT NULL " +
+					"  AND TRUNC(CON.DTBASEREAJ) - TRUNC(SYSDATE) IN (0, 15, 30) " +
+					"  AND NOT EXISTS ( " +
+					"      SELECT 1 FROM AD_LOGNOTIFCONTRATO LOG " +
+					"      WHERE LOG.NUMCONTRATO = CON.NUMCONTRATO " +
+					"        AND LOG.DTBASEREAJ = TRUNC(CON.DTBASEREAJ) " +
+					"        AND LOG.TIPONOTIF = CASE TRUNC(CON.DTBASEREAJ) - TRUNC(SYSDATE) " +
+					"                                WHEN 15 THEN '15DIAS' " +
+					"                                WHEN 30 THEN '30DIAS' " +
+					"                                WHEN 0  THEN 'HOJE' " +
+					"                            END " +
+					"  )";
 
 	@Override
 	public void onTime(ScheduledActionContext sac) {
-		// TODO Auto-generated method stub
-				JdbcWrapper jdbc = null;
-				NativeSql queryVoa = null;
-				ResultSet rset = null;
-				SessionHandle hnd = null;
-				NotificacaoUser notificauser = new NotificacaoUser();
-				EnvioEmail envioEmails = new EnvioEmail();
-				String tituloEmail15 = "Vencimento Data base reajuste 15 (dias)";
-				String tituloEmail30 = "Vencimento Data base reajuste 30 (dias)";
-				String tituloNotificacao = "Vencimento Data base reajuste hoje";
+
+		JdbcWrapper jdbc = null;
+		NativeSql query = null;
+		ResultSet rset = null;
+		SessionHandle hnd = null;
+
+		NotificacaoUser notificaUser = new NotificacaoUser();
+		EnvioEmail envioEmails = new EnvioEmail();
+
+		int totalEnviados = 0;
+		int totalErros = 0;
+
+		try {
+			hnd = JapeSession.open();
+			hnd.setFindersMaxRows(-1);
+
+			EntityFacade entity = EntityFacadeFactory.getDWFFacade();
+			jdbc = entity.getJdbcWrapper();
+			jdbc.openSession();
+
+			query = new NativeSql(jdbc);
+			query.appendSql(SQL_CONTRATOS_PENDENTES);
+			rset = query.executeQuery();
+
+			while (rset.next()) {
+				Long numContrato = rset.getLong("NUMCONTRATO");
+				Timestamp dataInicio = rset.getTimestamp("DTCONTRATO");
+				Timestamp dataReajuste = rset.getTimestamp("DTBASEREAJ");
+				String nomeParc = rset.getString("NOMEPARC");
+				String emailParc = rset.getString("EMAIL");
+				int diasRestantes = rset.getInt("DIAS_RESTANTES");
+
+				String tipoNotif = resolverTipoNotif(diasRestantes);
+				String tituloEmail = resolverTituloEmail(diasRestantes);
+
+				String dataInicioFmt = SDF.format(dataInicio);
+				String dataReajusteFmt = SDF.format(dataReajuste);
+				String linkContrato = geraLinkAviso(numContrato);
+
 				try {
+					// Monta e envia email
+					String corpoEmail = montarCorpoEmail(
+							nomeParc, numContrato, dataInicioFmt, dataReajusteFmt, diasRestantes
+					);
+					envioEmails.enviarEmail(tituloEmail, corpoEmail);
 
-					// Abre uma sessão no banco de dados
-					hnd = JapeSession.open();
-					hnd.setFindersMaxRows(-1);
-					// Obtém uma instância para interagir com o banco de dados
-					EntityFacade entity = EntityFacadeFactory.getDWFFacade();
-					jdbc = entity.getJdbcWrapper();
-					jdbc.openSession();
-					
-					// Cria uma consulta SQL
-					queryVoa = new NativeSql(jdbc);
-					queryVoa.appendSql("SELECT CON.NUMCONTRATO, CON.DTCONTRATO,CON.DTBASEREAJ,CON.CODPARC,t.EMAIL,PAR.NOMEPARC \r\n"
-							+ "					FROM TCSCON CON,TGFPAR PAR,TGFCTT t\r\n"
-							+ "					WHERE CON.CODPARC = PAR.CODPARC \r\n"
-							+ "					AND t.CODPARC = PAR.CODPARC");
-					
-					// Executa a consulta SQL e obtém o conjunto de resultados
-					rset = queryVoa.executeQuery();
-					while (rset.next()) {
-						// Obtém os valores das colunas do resultado da consulta
-						Long numeroContrato = rset.getLong("NUMCONTRATO");
-						Date datainicio = rset.getDate("DTCONTRATO");
-						Date datafim = rset.getDate("DTBASEREAJ");
-						String nomeParc = rset.getString("NOMEPARC");
-						String emailparc = rset.getString("EMAIL");
-				
-						String linkContrato = geraLinkAviso(numeroContrato); // Passa numeroContrato em vez de numcontrato
-						// Converte as datas para o formato desejado
-						SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
-						String dataInicioFormatada = sdf.format(datainicio);
-						String dataFimFormatada = sdf.format(datafim);
-						// Data atual do calendário
-						Calendar dataAtual = Calendar.getInstance();
-						// Remover horas, minutos, segundos e milissegundos da data atual
-						zerarHorasMinutosSegundos(dataAtual);
-						
-						Calendar dataExpiracao15 = Calendar.getInstance();
-						dataExpiracao15.setTime(datafim);
-						dataExpiracao15.add(Calendar.DATE, -15); // Alteração aqui para subtrair 15 dias
-						zerarHorasMinutosSegundos(dataExpiracao15);// Remover horas, minutos, segundos e milissegundos da data de vencimento
-						
-						Calendar dataExpiracao30 = Calendar.getInstance();
-						dataExpiracao30.setTime(datafim);
-						dataExpiracao30.add(Calendar.DATE, -30); // Notificados com 30 dias de atraso
-						zerarHorasMinutosSegundos(dataExpiracao30); // Remover horas, minutos, segundos e milissegundos da data de vencimento
-						
-						
-						// Verifica se a diferença entre a data de vencimento e a data atual é  exatamente de 30 e 15 dias
-						
-						long diferencaEmMillis15 = dataAtual.getTimeInMillis() - dataExpiracao15.getTimeInMillis();
-						long diferencaEmDias15 = TimeUnit.DAYS.convert(diferencaEmMillis15, TimeUnit.MILLISECONDS);
-						
-						long diferencaEmMillis30 = dataAtual.getTimeInMillis() - dataExpiracao30.getTimeInMillis();
-						long diferencaEmDias30 = TimeUnit.DAYS.convert(diferencaEmMillis30, TimeUnit.MILLISECONDS);
-						
-						if (diferencaEmDias15 == 0) {
-						// Corpo do email com variáveis inseridas
-						String corpoemail = "<!DOCTYPE html>\r\n"
-								+ "<html>\r\n"
-								+ "<head>\r\n"
-								+ "<title>Lembrete da Argo Fruta</title>\r\n"
-								+ "<link href=\"https://fonts.googleapis.com/css?family=Poppins:200,300,400,500,600,700\" rel=\"stylesheet\">\r\n"
-								+ "</head>\r\n"
-								+ "<body style=\"background-color: #f4f4f4; margin: 0; padding: 0; width: 100%; height: 100%; font-family: Poppins, sans-serif; color: rgba(0, 0, 0, .4);\">\r\n"
-								+ "<table width=\"100%\" height=\"100%\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\r\n"
-								+ "    <tr>\r\n"
-								+ "        <td align=\"center\" valign=\"top\" style=\"padding-top: 20px; padding-bottom: 20px;\">\r\n"
-								+ "            <table width=\"600\" border=\"0\" cellpadding=\"20\" cellspacing=\"0\" style=\"background-color: white; margin: auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 400px;\">\r\n"
-								+ "                <tr>\r\n"
-								+ "                    <td align=\"center\" style=\"margin-bottom: 20px; \">\r\n"
-								+ "                        <img src=\"https://argofruta.com/wp-content/uploads/2021/05/Logo-text-green.png\" alt=\"Satya Code Logo\" width=\"250\" style=\"margin-top: 30px;\">\r\n"
-								+ "                    </td>\r\n"
-								+ "                </tr>\r\n"
-								+ "                <tr>\r\n"
-								+ "                    <td>\r\n"
-								+ "                        <h2 style=\"font-family: Poppins, sans-serif; color: #000000; margin-top: 0; font-weight: 400;text-align: center; \">Lembrete da ArgoFruta</h2>\r\n"
-								+ "                        <div style=\"  border: 1px solid rgba(0, 0, 0, .05); max-width: 80%;margin: 0 auto;padding: 2em;\">\r\n"
-								+ "                            <p style=\"text-align: justify; font-size: 15px;\">Prezado " + nomeParc + ",<br>\r\n"
-								+ "                            Identificamos que o(s) seu(s) contrato(s) nº " + numeroContrato + " expira em 15(dias).<br>\r\n"
-								+ "                            Data de Início do Contrato: " + dataInicioFormatada + "<br>\r\n"
-								+ "                            Data de Término do Contrato: " + dataFimFormatada + "<br>\r\n"
-								+ "                            .</p>\r\n"
-								+ "                        </div>\r\n"
-								+ "                        <br>\r\n"
-								+ "                    </td>\r\n"
-								+ "                </tr>\r\n"
-								+ "            </table>\r\n"
-								+ "        </td>\r\n"
-								+ "    </tr>\r\n"
-								+ "</table>\r\n"
-								+ "</body>\r\n"
-								+ "</html>";
+					// Monta e envia notificação interna
+					String mensagemNotif = montarNotificacao(
+							nomeParc, emailParc, dataReajusteFmt, linkContrato, diasRestantes
+					);
+					notificaUser.notifUsu(mensagemNotif, tituloEmail);
 
-						
-						String mensagemNotificacao = "<h4>Parceiro</h4>"
-						        + "<p>" + nomeParc + ".</p>"
-						        + "<hr>"
-						        + "<h4>E-mail contato</h4>"
-						        + "<p>" + emailparc + ".</p>"
-						        + "<hr>"
-						        + "<h4>Data base reajuste</h4>"
-						        + "<p>" + dataFimFormatada + "</p>"
-						        + "<hr>"
-						        + "<h4>Visualizar o contrato</h4>"
-						        + "<p><a href='" + linkContrato + "'>Ver contrato</a></p>";
+					// Registra no log para não enviar novamente
+					registrarLogEnvio( numContrato, tipoNotif, dataReajuste);
+					totalEnviados++;
 
-
-
-						// Enviar o email
-						envioEmails.enviarEmail(tituloEmail15, corpoemail);
-						notificauser.notifUsu( mensagemNotificacao, tituloEmail15);
-						}else if (diferencaEmDias30 == 0) {
-							// Corpo do email com variáveis inseridas
-							String corpoemail = "<!DOCTYPE html>\r\n"
-									+ "<html>\r\n"
-									+ "<head>\r\n"
-									+ "<title>Lembrete da Argo Fruta</title>\r\n"
-									+ "<link href=\"https://fonts.googleapis.com/css?family=Poppins:200,300,400,500,600,700\" rel=\"stylesheet\">\r\n"
-									+ "</head>\r\n"
-									+ "<body style=\"background-color: #f4f4f4; margin: 0; padding: 0; width: 100%; height: 100%; font-family: Poppins, sans-serif; color: rgba(0, 0, 0, .4);\">\r\n"
-									+ "<table width=\"100%\" height=\"100%\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\r\n"
-									+ "    <tr>\r\n"
-									+ "        <td align=\"center\" valign=\"top\" style=\"padding-top: 20px; padding-bottom: 20px;\">\r\n"
-									+ "            <table width=\"600\" border=\"0\" cellpadding=\"20\" cellspacing=\"0\" style=\"background-color: white; margin: auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 400px;\">\r\n"
-									+ "                <tr>\r\n"
-									+ "                    <td align=\"center\" style=\"margin-bottom: 20px; \">\r\n"
-									+ "                        <img src=\"https://argofruta.com/wp-content/uploads/2021/05/Logo-text-green.png\" alt=\"Satya Code Logo\" width=\"250\" style=\"margin-top: 30px;\">\r\n"
-									+ "                    </td>\r\n"
-									+ "                </tr>\r\n"
-									+ "                <tr>\r\n"
-									+ "                    <td>\r\n"
-									+ "                        <h2 style=\"font-family: Poppins, sans-serif; color: #000000; margin-top: 0; font-weight: 400;text-align: center; \">Lembrete da ArgoFruta</h2>\r\n"
-									+ "                        <div style=\"  border: 1px solid rgba(0, 0, 0, .05); max-width: 80%;margin: 0 auto;padding: 2em;\">\r\n"
-									+ "                            <p style=\"text-align: justify; font-size: 15px;\">Prezado " + nomeParc + ",<br>\r\n"
-									+ "                            Identificamos que o(s) seu(s) contrato(s) nº " + numeroContrato + " expira em 30(dias).<br>\r\n"
-									+ "                            Data de Início do Contrato: " + dataInicioFormatada + "<br>\r\n"
-									+ "                            Data de Término do Contrato: " + dataFimFormatada + "<br>\r\n"
-									+ "                            .</p>\r\n"
-									+ "                        </div>\r\n"
-									+ "                        <br>\r\n"
-									+ "                    </td>\r\n"
-									+ "                </tr>\r\n"
-									+ "            </table>\r\n"
-									+ "        </td>\r\n"
-									+ "    </tr>\r\n"
-									+ "</table>\r\n"
-									+ "</body>\r\n"
-									+ "</html>";
-
-							
-							String mensagemNotificacao = "<h4>Parceiro</h4>"
-							        + "<p>" + nomeParc + ".</p>"
-							        + "<hr>"
-							        + "<h4>E-mail contato</h4>"
-							        + "<p>" + emailparc + ".</p>"
-							        + "<hr>"
-							        + "<h4>Data base reajuste</h4>"
-							        + "<p>" + dataFimFormatada + "</p>"
-							        + "<hr>"
-							        + "<h4>Visualizar o contrato</h4>"
-							        + "<p><a href='" + linkContrato + "'>Ver contrato</a></p>";
-
-
-
-							// Enviar o email
-							envioEmails.enviarEmail(tituloEmail30, corpoemail);
-							notificauser.notifUsu(mensagemNotificacao, tituloEmail30);
-							
-						}else if (datafim.equals(dataAtual.getTime())) {
-							String corpoemail2 = "<!DOCTYPE html>\r\n"
-									+ "<head>\r\n"
-									+ "<title>Lembrete da Argo Fruta</title>\r\n"
-									+ "<link href=\"https://fonts.googleapis.com/css?family=Poppins:200,300,400,500,600,700\" rel=\"stylesheet\">\r\n"
-									+ "</head>\r\n"
-									+ "<body style=\"background-color: #f4f4f4; margin: 0; padding: 0; width: 100%; height: 100%; font-family: Poppins, sans-serif; color: rgba(0, 0, 0, .4);\">\r\n"
-									+ "<table width=\"100%\" height=\"100%\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\r\n"
-									+ "    <tr>\r\n"
-									+ "        <td align=\"center\" valign=\"top\" style=\"padding-top: 20px; padding-bottom: 20px;\">\r\n"
-									+ "            <table width=\"600\" border=\"0\" cellpadding=\"20\" cellspacing=\"0\" style=\"background-color: white; margin: auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 400px;\">\r\n"
-									+ "                <tr>\r\n"
-									+ "                    <td align=\"center\" style=\"margin-bottom: 20px; \">\r\n"
-									+ "                        <img src=\"https://argofruta.com/wp-content/uploads/2021/05/Logo-text-green.png\" alt=\"Satya Code Logo\" width=\"250\" style=\"margin-top: 30px;\">\r\n"
-									+ "                    </td>\r\n"
-									+ "                </tr>\r\n"
-									+ "                <tr>\r\n"
-									+ "                    <td>\r\n"
-									+ "                        <h2 style=\"font-family: Poppins, sans-serif; color: #000000; margin-top: 0; font-weight: 400;text-align: center; \">Lembrete da ArgoFruta</h2>\r\n"
-									+ "                        <div style=\"  border: 1px solid rgba(0, 0, 0, .05); max-width: 80%;margin: 0 auto;padding: 2em;\">\r\n"
-									+ "                            <p style=\"text-align: justify; font-size: 15px;\">Prezado " + nomeParc + ",<br>\r\n"
-									+ "                            Identificamos que o(s) seu(s) contrato(s) nº " + numeroContrato + " .<br>\r\n"
-									+ "                            Data de Início do Contrato: " + dataInicioFormatada + "<br>\r\n"
-									+ "                            Data de Término do contrato expira em hoje : " + dataFimFormatada + "<br>\r\n"
-									+ "                            Por favor, entre em contato para mais informações.</p>\r\n"
-									+ "                        </div>\r\n"
-									+ "                        <br>\r\n"
-									+ "                    </td>\r\n"
-									+ "                </tr>\r\n"
-									+ "            </table>\r\n"
-									+ "        </td>\r\n"
-									+ "    </tr>\r\n"
-									+ "</table>\r\n"
-									+ "</body>\r\n"
-									+ "</html>";
-							
-							String mensagemNotificacao = "<h4>Parceiro</h4>"
-							        + "<p>" + nomeParc + ".</p>"
-							        + "<hr>"
-							        + "<h4>E-mail contato</h4>"
-							        + "<p>" + emailparc + ".</p>"
-							        + "<hr>"
-							        + "<h4>Data base reajuste hoje</h4>"
-							        + "<p>" + dataFimFormatada + "</p>"
-							        + "<hr>"
-							        + "<h4>Visualizar o contrato</h4>"
-							        + "<p><a href='" + linkContrato + "'>Ver contrato</a></p>";
-						
-
-							
-							envioEmails.enviarEmail(tituloNotificacao, corpoemail2);
-							notificauser.notifUsu( mensagemNotificacao, tituloNotificacao);
-							
-						}
-					}
-
-				} catch (Exception e) {
-					// Exibir erro
-					e.printStackTrace();
-					sac.info("Erro Evento Programado Atualização de emails para contratos: " + e.getMessage());
-				} finally {
-					// Liberação de recursos e fechamento da sessão
-					JdbcUtils.closeResultSet(rset);
-					JdbcWrapper.closeSession(jdbc);
-					JapeSession.close(hnd);
-					NativeSql.releaseResources(queryVoa);
+				} catch (Exception envioEx) {
+					totalErros++;
+					sac.info("Erro ao notificar contrato " + numContrato + ": " + envioEx.getMessage());
 				}
 			}
-			private void zerarHorasMinutosSegundos(Calendar calendar) {
-				calendar.set(Calendar.HOUR_OF_DAY, 0);
-				calendar.set(Calendar.MINUTE, 0);
-				calendar.set(Calendar.SECOND, 0);
-				calendar.set(Calendar.MILLISECOND, 0);
-			}
-			public String geraLinkAviso(Long numeroContrato) {
-			    // - Termos fixos para a montagem da URL
-			    String prefixo = "#app";
-			    String resourceIdTela = "br.com.sankhya.os.cad.contratos";
-			    String mascara = "{\"NUMCONTRATO\":\"%d\"}";
 
-			    // - Processamento dos parametros de entrada
-			    String parametrosTela = String.format(mascara, numeroContrato);
-			    
-			    // - Montagem dos Base64
-			    String tela = java.util.Base64.getEncoder().encodeToString(resourceIdTela.getBytes());
-			    String parametros = java.util.Base64.getEncoder().encodeToString(parametrosTela.getBytes());
-			    
-			    // - Montagem final da URL
-			    String link = prefixo + "/" + tela + "/" + parametros;
-			    
-			    // - Retorno da url final
-			    return link;
-			}
+			sac.info("Job finalizado - Enviados: " + totalEnviados + " | Erros: " + totalErros);
 
-		}	
+		} catch (Exception e) {
+			e.printStackTrace();
+			sac.info("Erro Evento Programado Reajuste Contratos: " + e.getMessage());
+		} finally {
+			JdbcUtils.closeResultSet(rset);
+			NativeSql.releaseResources(query);
+			JdbcWrapper.closeSession(jdbc);
+			JapeSession.close(hnd);
+		}
+	}
+
+	// ========================== REGISTRO DE LOG ==========================
+
+	/**
+	 * Insere registro na AD_LOGNOTIFCONTRATO após envio bem-sucedido.
+	 * A constraint UK_NOTIF (NUMCONTRATO, TIPONOTIF, DTBASEREAJ)
+	 * garante idempotência mesmo em caso de execução concorrente.
+	 *
+	 */
+	private void registrarLogEnvio(Long numContrato, String tipoNotif, Timestamp dtBaseReaj) throws Exception {
+		EntityFacade entityFacade = EntityFacadeFactory.getDWFFacade();
+		JdbcWrapper jdbcLog = entityFacade.getJdbcWrapper();
+		PreparedStatement pstmt = null;
+		try {
+			jdbcLog.openSession();
+			String sql = "INSERT INTO AD_LOGNOTIFCONTRATO (IDLOG, NUMCONTRATO, TIPONOTIF, DTBASEREAJ, DTENVIO) " +
+					"VALUES (SEQ_LOGNOTIFCONTRATO.NEXTVAL, ?, ?, ?, SYSDATE)";
+			pstmt = jdbcLog.getPreparedStatement(sql);
+			pstmt.setBigDecimal(1, new BigDecimal(numContrato));
+			pstmt.setString(2, tipoNotif);
+			pstmt.setTimestamp(3, dtBaseReaj);
+			pstmt.executeUpdate();
+		} catch (Exception e) {
+			if (e.getMessage() != null && e.getMessage().contains("UK_NOTIF")) {
+				// Já registrado, ignora
+			} else {
+				throw e;
+			}
+		} finally {
+			if (pstmt != null) {
+				pstmt.close();
+			}
+			JdbcWrapper.closeSession(jdbcLog);
+		}
+	}
+
+	// ========================== RESOLVERS ==========================
+
+	private String resolverTipoNotif(int diasRestantes) {
+		switch (diasRestantes) {
+			case 30: return "30DIAS";
+			case 15: return "15DIAS";
+			case 0:  return "HOJE";
+			default: return "OUTRO";
+		}
+	}
+
+	private String resolverTituloEmail(int diasRestantes) {
+		switch (diasRestantes) {
+			case 30: return "Vencimento Data base reajuste 30 (dias)";
+			case 15: return "Vencimento Data base reajuste 15 (dias)";
+			case 0:  return "Vencimento Data base reajuste hoje";
+			default: return "Vencimento Data base reajuste";
+		}
+	}
+
+	// ========================== MONTAGEM DE EMAIL ==========================
+
+	private String montarCorpoEmail(String nomeParc, Long numContrato, String dataInicio, String dataFim, int diasRestantes) {
+		String mensagemPrazo;
+		if (diasRestantes == 0) {
+			mensagemPrazo = "Identificamos que o(s) seu(s) contrato(s) n&ordm; " + numContrato + " expira hoje.<br>"
+					+ "Data de In&iacute;cio do Contrato: " + dataInicio + "<br>"
+					+ "Data de T&eacute;rmino do Contrato: " + dataFim + "<br>"
+					+ "Por favor, entre em contato para mais informa&ccedil;&otilde;es.";
+		} else {
+			mensagemPrazo = "Identificamos que o(s) seu(s) contrato(s) n&ordm; " + numContrato + " expira em " + diasRestantes + " (dias).<br>"
+					+ "Data de In&iacute;cio do Contrato: " + dataInicio + "<br>"
+					+ "Data de T&eacute;rmino do Contrato: " + dataFim;
+		}
+
+		return "<!DOCTYPE html>\n"
+				+ "<html>\n"
+				+ "<head>\n"
+				+ "<title>Lembrete da Argo Fruta</title>\n"
+				+ "<link href=\"https://fonts.googleapis.com/css?family=Poppins:200,300,400,500,600,700\" rel=\"stylesheet\">\n"
+				+ "</head>\n"
+				+ "<body style=\"background-color: #f4f4f4; margin: 0; padding: 0; width: 100%; height: 100%; font-family: Poppins, sans-serif; color: rgba(0, 0, 0, .4);\">\n"
+				+ "<table width=\"100%\" height=\"100%\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\n"
+				+ "    <tr>\n"
+				+ "        <td align=\"center\" valign=\"top\" style=\"padding-top: 20px; padding-bottom: 20px;\">\n"
+				+ "            <table width=\"600\" border=\"0\" cellpadding=\"20\" cellspacing=\"0\" style=\"background-color: white; margin: auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 400px;\">\n"
+				+ "                <tr>\n"
+				+ "                    <td align=\"center\" style=\"margin-bottom: 20px;\">\n"
+				+ "                        <img src=\"https://argofruta.com/wp-content/uploads/2021/05/Logo-text-green.png\" alt=\"Argo Fruta Logo\" width=\"250\" style=\"margin-top: 30px;\">\n"
+				+ "                    </td>\n"
+				+ "                </tr>\n"
+				+ "                <tr>\n"
+				+ "                    <td>\n"
+				+ "                        <h2 style=\"font-family: Poppins, sans-serif; color: #000000; margin-top: 0; font-weight: 400; text-align: center;\">Lembrete da ArgoFruta</h2>\n"
+				+ "                        <div style=\"border: 1px solid rgba(0, 0, 0, .05); max-width: 80%; margin: 0 auto; padding: 2em;\">\n"
+				+ "                            <p style=\"text-align: justify; font-size: 15px;\">Prezado " + nomeParc + ",<br>\n"
+				+ "                            " + mensagemPrazo + "</p>\n"
+				+ "                        </div>\n"
+				+ "                        <br>\n"
+				+ "                    </td>\n"
+				+ "                </tr>\n"
+				+ "            </table>\n"
+				+ "        </td>\n"
+				+ "    </tr>\n"
+				+ "</table>\n"
+				+ "</body>\n"
+				+ "</html>";
+	}
+
+	// ========================== MONTAGEM DE NOTIFICAÇÃO ==========================
+
+	private String montarNotificacao(String nomeParc, String emailParc, String dataReajuste, String linkContrato, int diasRestantes) {
+		String tituloData = diasRestantes == 0 ? "Data base reajuste hoje" : "Data base reajuste";
+
+		return "<h4>Parceiro</h4>"
+				+ "<p>" + nomeParc + "</p>"
+				+ "<hr>"
+				+ "<h4>E-mail contato</h4>"
+				+ "<p>" + emailParc + "</p>"
+				+ "<hr>"
+				+ "<h4>" + tituloData + "</h4>"
+				+ "<p>" + dataReajuste + "</p>"
+				+ "<hr>"
+				+ "<h4>Visualizar o contrato</h4>"
+				+ "<p><a href='" + linkContrato + "'>Ver contrato</a></p>";
+	}
+
+	// ========================== LINK DO CONTRATO ==========================
+
+	public String geraLinkAviso(Long numeroContrato) {
+		String prefixo = "#app";
+		String resourceIdTela = "br.com.sankhya.os.cad.contratos";
+		String mascara = "{\"NUMCONTRATO\":\"%d\"}";
+
+		String parametrosTela = String.format(mascara, numeroContrato);
+
+		String tela = java.util.Base64.getEncoder().encodeToString(resourceIdTela.getBytes());
+		String parametros = java.util.Base64.getEncoder().encodeToString(parametrosTela.getBytes());
+
+		return prefixo + "/" + tela + "/" + parametros;
+	}
+}
+// Cron sugerido: 0 0 6 ? * *

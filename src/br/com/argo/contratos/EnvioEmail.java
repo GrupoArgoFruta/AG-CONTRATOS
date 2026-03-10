@@ -18,6 +18,7 @@ public class EnvioEmail {
 			JapeWrapper ordemServicoDAO = JapeFactory.dao(DynamicEntityNames.FILA_MSG);
 			ordemServicoDAO.create()
 			.set("EMAIL", "juridico@argofruta.com")
+//			.set("EMAIL", "natanael.lopes@argofruta.com")
 			.set("CODCON", BigDecimal.ZERO)
 			.set("STATUS", "Pendente")
 			.set("TIPOENVIO", "E")
